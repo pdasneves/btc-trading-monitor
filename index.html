@@ -57,6 +57,22 @@ NOTA: La simulación de posición NO es persistente entre recargas del navegador
             font-weight: 600;
             color: #58a6ff;
         }
+        #final-alert-box {
+            min-height: 100px;
+            /* Se define color base en JS */
+        }
+        .alert-bg-long {
+            background-color: #238636; /* Verde de la señal LONG */
+            color: #ffffff;
+        }
+        .alert-bg-short {
+            background-color: #da3633; /* Rojo de la señal SHORT */
+            color: #ffffff;
+        }
+        .alert-bg-neutral {
+            background-color: #e69e00; /* Amarillo oscuro para Neutral */
+            color: #0d1117;
+        }
     </style>
 </head>
 <body class="p-4 md:p-8">
@@ -70,8 +86,16 @@ NOTA: La simulación de posición NO es persistente entre recargas del navegador
             Análisis Multi-Timeframe | Fuente: Binance (BTC/USDT)
         </p>
         <div id="globalPrice" class="text-3xl font-bold text-green-400">Cargando...</div>
-        <div class="text-sm text-gray-500 mt-1">Última Actualización: <span id="lastUpdated">--</span> | Intervalo: 10 min</div>
+        <div class="text-sm text-gray-500 mt-1">Última Actualización: <span id="lastUpdated">--</span> | Intervalo: 5 min</div>
     </header>
+
+    <!-- Caja de Alerta Unificada (Nueva) -->
+    <section class="mb-8 p-4 rounded-xl module-card">
+        <h2 class="text-xl font-bold mb-3 text-yellow-400">ALERTA UNIFICADA Y PLAN DE ACCIÓN</h2>
+        <div id="final-alert-box" class="p-4 rounded-lg text-sm transition-colors duration-300 bg-gray-700 text-gray-300">
+            Esperando datos de todos los timeframes para consolidar la señal...
+        </div>
+    </section>
     
     <!-- Grid de Monitores de Timeframe -->
     <main id="monitorGrid" class="grid monitor-grid gap-6">
@@ -110,41 +134,25 @@ NOTA: La simulación de posición NO es persistente entre recargas del navegador
         // Estado simulado de la posición (NO PERSISTENTE)
         let positions = {};
         
-        // Estado de la señal anterior para evitar alertas repetidas
+        // Estado de la señal anterior para evitar alertas repetidas y para la lógica de confluencia
         let previousSignals = {}; 
-        
-        // --- SECCIÓN 2: UTILERÍAS DE CÁLCULO DE INDICADORES ---
+        let currentSignals = {}; // Almacena el resultado de la señal para la confluencia
 
-        /**
-         * Calcula la Media Móvil Exponencial (EMA).
-         * @param {number[]} data - Array de precios de cierre.
-         * @param {number} period - Período de la EMA.
-         * @returns {number[]} Array con los valores de la EMA.
-         */
+        // --- SECCIÓN 2: UTILERÍAS DE CÁLCULO DE INDICADORES (Mantenido de versiones anteriores) ---
+
         function calculateEMA(data, period) {
             if (data.length < period) return [];
             const k = 2 / (period + 1);
             let emaArray = new Array(data.length).fill(null);
-
-            // Calcular el primer valor (SMA inicial)
             let sum = 0;
-            for (let i = 0; i < period; i++) {
-                sum += data[i];
-            }
+            for (let i = 0; i < period; i++) { sum += data[i]; }
             emaArray[period - 1] = sum / period;
-
-            // Calcular los valores subsiguientes
             for (let i = period; i < data.length; i++) {
                 emaArray[i] = (data[i] - emaArray[i - 1]) * k + emaArray[i - 1];
             }
             return emaArray;
         }
 
-        /**
-         * Calcula el MACD (Moving Average Convergence Divergence).
-         * @param {number[]} closes - Array de precios de cierre.
-         * @returns {{macdLine: number, macdSignal: number, histogram: number, historyLength: number}} Valores del MACD y Signal de la última vela.
-         */
         function calculateMACD(closes) {
             const ema12 = calculateEMA(closes, PARAMS.MACD_FAST);
             const ema26 = calculateEMA(closes, PARAMS.MACD_SLOW);
@@ -156,30 +164,21 @@ NOTA: La simulación de posición NO es persistente entre recargas del navegador
             const macdSignalArray = calculateEMA(macdLineArray, PARAMS.MACD_SIGNAL);
 
             const historyLength = macdLineArray.length;
-            const macdLine = macdLineArray[historyLength - 1];
+            
+            // CORRECCIÓN: Definir macdLine antes de calcular histogram
+            const macdLine = macdLineArray[historyLength - 1]; 
             const macdSignal = macdSignalArray[macdSignalArray.length - 1];
             const histogram = macdLine - macdSignal;
-
+            
+            // macdResult no está definido, se retorna el objeto directamente
             return { macdLine, macdSignal, histogram, historyLength };
         }
 
-        /**
-         * Calcula el Índice de Fuerza Relativa (RSI).
-         * @param {number[]} closes - Array de precios de cierre.
-         * @param {number} period - Período del RSI.
-         * @returns {number[]} Array con los valores de RSI.
-         */
         function calculateRSI(closes, period) {
-            const changes = [];
-            for (let i = 1; i < closes.length; i++) {
-                changes.push(closes[i] - closes[i - 1]);
-            }
-
+             const changes = [];
+            for (let i = 1; i < closes.length; i++) { changes.push(closes[i] - closes[i - 1]); }
             const rsiArray = new Array(closes.length).fill(null);
-
             if (changes.length < period) return [];
-
-            // Cálculo inicial de ganancia promedio (avgGain) y pérdida promedio (avgLoss)
             let initialGain = 0;
             let initialLoss = 0;
             for (let i = 0; i < period; i++) {
@@ -188,107 +187,66 @@ NOTA: La simulación de posición NO es persistente entre recargas del navegador
             }
             let avgGain = initialGain / period;
             let avgLoss = initialLoss / period;
-
-            // Primer valor de RSI
             const rs = avgGain / avgLoss;
             rsiArray[period] = 100 - (100 / (1 + rs));
-
-            // Valores subsiguientes
             for (let i = period + 1; i < closes.length; i++) {
                 const change = changes[i - 1];
                 let currentGain = 0;
                 let currentLoss = 0;
-
                 if (change > 0) currentGain = change;
                 if (change < 0) currentLoss = -change;
-
                 avgGain = (avgGain * (period - 1) + currentGain) / period;
                 avgLoss = (avgLoss * (period - 1) + currentLoss) / period;
-
                 const currentRS = avgGain / avgLoss;
                 rsiArray[i] = 100 - (100 / (1 + currentRS));
             }
-
-            // Devolver solo el último valor de RSI válido
             return rsiArray.filter(val => val !== null);
         }
 
-        /**
-         * Calcula el Average True Range (ATR).
-         * @param {object[]} history - Array de objetos de velas {open, high, low, close}.
-         * @param {number} period - Período del ATR.
-         * @returns {{atr: number, trueRanges: number[]}} Último valor de ATR.
-         */
         function calculateATR(history, period) {
             if (history.length < period) return { atr: 0 };
             const trueRanges = [];
-
             for (let i = 1; i < history.length; i++) {
                 const h = history[i].high;
                 const l = history[i].low;
                 const prevC = history[i - 1].close;
-
-                // True Range (TR) = Max[H - L, Abs(H - C_prev), Abs(L - C_prev)]
                 const tr = Math.max(h - l, Math.abs(h - prevC), Math.abs(l - prevC));
                 trueRanges.push(tr);
             }
-
             let atrArray = new Array(trueRanges.length).fill(null);
-
-            // Cálculo inicial (SMA del True Range)
             let sumTR = 0;
-            for (let i = 0; i < period; i++) {
-                sumTR += trueRanges[i];
-            }
+            for (let i = 0; i < period; i++) { sumTR += trueRanges[i]; }
             atrArray[period - 1] = sumTR / period;
-
-            // Cálculo subsiguiente (Wilder's smoothing)
             for (let i = period; i < trueRanges.length; i++) {
                 atrArray[i] = (atrArray[i - 1] * (period - 1) + trueRanges[i]) / period;
             }
-
-            // El ATR final es el último valor calculado en el array
             const atr = atrArray[atrArray.length - 1];
             return { atr: atr || 0 };
         }
 
-        // --- SECCIÓN 3: LÓGICA DE TRADING ---
-
         /**
-         * Aplica la estrategia completa a los datos históricos y al precio actual.
-         * @param {object[]} history - Datos de velas OHLC de Binance.
-         * @param {string} timeframe - Marco temporal (e.g., '1d', '4h').
-         * @returns {{signal: string, reason: string, indicators: object, risk: object}} Resultado del análisis.
+         * Aplica la estrategia EMA/MACD/RSI a los datos históricos y al precio actual.
+         * Devuelve la señal (LONG, SHORT, NEUTRO) y la razón.
          */
         function applyStrategy(history, timeframe) {
             if (history.length < PARAMS.EMA_SLOW) {
-                return {
-                    signal: 'NEUTRO',
-                    reason: `Requiere al menos ${PARAMS.EMA_SLOW} velas. Solo hay ${history.length}.`,
-                    indicators: {},
-                    risk: {}
-                };
+                return { signal: 'NEUTRO', reason: `Requiere ${PARAMS.EMA_SLOW} velas.`, indicators: {}, risk: {} };
             }
 
             const closes = history.map(v => v.close);
             const currentPrice = closes[closes.length - 1];
-
-            // 1. Cálculos de Indicadores
-            const ema50Array = calculateEMA(closes, PARAMS.EMA_FAST);
-            const rsiArray = calculateRSI(closes, PARAMS.RSI_PERIOD);
-            const macdResult = calculateMACD(closes);
+            
+            const ema50 = calculateEMA(closes, PARAMS.EMA_FAST).pop();
+            const ema200 = calculateEMA(closes, PARAMS.EMA_SLOW).pop();
+            const rsi = calculateRSI(closes, PARAMS.RSI_PERIOD).pop();
+            const macdResult = calculateMACD(closes); // Aquí macdResult se define
             const atrResult = calculateATR(history, PARAMS.ATR_PERIOD);
 
-            // Últimos valores de los indicadores
-            const ema50 = ema50Array[ema50Array.length - 1];
-            // Recalcular EMA 200 correctamente (calculando el array de EMA 200 y tomando el último valor)
-            const ema200 = calculateEMA(closes, PARAMS.EMA_SLOW)[calculateEMA(closes, PARAMS.EMA_SLOW).length - 1];
-            const rsi = rsiArray[rsiArray.length - 1];
             const macdLine = macdResult.macdLine;
             const macdSignal = macdResult.macdSignal;
             const atr = atrResult.atr;
             
-            // 2. Definición de Condiciones
+            // Condiciones de Entrada
             const isBullishTrend = ema50 > ema200;
             const isBearishTrend = ema50 < ema200;
             const isBullishMomentum = macdLine > macdSignal;
@@ -296,34 +254,20 @@ NOTA: La simulación de posición NO es persistente entre recargas del navegador
             const isRSIStrong = rsi > 50 && rsi <= PARAMS.RSI_OVERBOUGHT;
             const isRSIWeak = rsi < 50 && rsi >= PARAMS.RSI_OVERSOLD;
 
-            // 3. Lógica de Señal (Long/Short)
             let signal = 'NEUTRO';
-            let reason = 'Esperando condiciones de entrada (EMA, MACD, RSI)...';
+            let reason = 'Esperando confluencia de indicadores.';
 
-            // Señal de COMPRA (LONG)
             if (isBullishTrend && isBullishMomentum && isRSIStrong) {
                 signal = 'LONG';
-                reason = 'Tendencia alcista (EMA 50/200), Momentum positivo (MACD) y Fuerza (RSI > 50).';
-            }
-            // Señal de VENTA (SHORT)
-            else if (isBearishTrend && isBearishMomentum && isRSIWeak) {
+                reason = 'Tendencia Alcista (EMA 50/200), Momentum Positivo (MACD) y Fuerza (RSI > 50).';
+            } else if (isBearishTrend && isBearishMomentum && isRSIWeak) {
                 signal = 'SHORT';
-                reason = 'Tendencia bajista (EMA 50/200), Momentum negativo (MACD) y Debilidad (RSI < 50).';
-            }
-            // Neutro - Fuera de condiciones de entrada
-            else if (isBullishTrend && !isBullishMomentum) {
-                reason = 'Tendencia Alcista, pero MACD (Momentum) no confirma la entrada.';
-            } else if (isBearishTrend && !isBullishMomentum) {
-                reason = 'Tendencia Bajista, pero MACD (Momentum) no confirma la entrada.';
-            } else if (Math.abs(ema50 - ema200) < (ema200 * 0.001)) {
-                reason = 'EMA 50 y 200 están muy juntas (Rango/Consolidación).';
+                reason = 'Tendencia Bajista (EMA 50/200), Momentum Negativo (MACD) y Debilidad (RSI < 50).';
             } else {
                  reason = 'Condiciones de entrada no se cumplen simultáneamente.';
             }
-            
-            // Nota: Se ha eliminado el Filtro de Codicia y Miedo
 
-            // 4. Gestión de Riesgo (Risk Management - Simulación No Persistente)
+            // Gestión de Riesgo (Simulación de Trailing Stop)
             let risk = {
                 R: atr * PARAMS.ATR_SL_MULTIPLIER,
                 SL: null,
@@ -331,51 +275,39 @@ NOTA: La simulación de posición NO es persistente entre recargas del navegador
                 message: 'No hay posición activa.'
             };
             
-            // Si hay una posición abierta (simulada en RAM)
+            // Lógica de Trailing Stop avanzada (Mantener la complejidad para consistencia)
             if (positions[timeframe] && positions[timeframe].isActive) {
                 const entryPrice = positions[timeframe].entryPrice;
                 const riskR = atr * PARAMS.ATR_SL_MULTIPLIER;
                 
                 if (positions[timeframe].type === 'LONG') {
-                    // SL y TP Inicial
                     risk.SL = entryPrice - riskR; 
                     risk.TP = entryPrice + riskR * PARAMS.ATR_TP_MULTIPLIER; 
-
-                    // Lógica de Trailing SL (Breakeven y Mínimo Significativo)
                     const gainInR = (currentPrice - entryPrice) / riskR;
+
                     if (gainInR >= 1.0) {
-                        // Mover SL a Breakeven o Trailing Stop
                         const lowHistory = history.slice(history.length - 1 - PARAMS.SIGNIFICANT_LOW_PERIOD, history.length - 1);
                         const lastSignificantLow = lowHistory.reduce((min, candle) => Math.min(min, candle.low), entryPrice);
                         const trailingSL = lastSignificantLow - atr * PARAMS.TRAILING_STOP_ATR_MULTIPLIER;
                         
-                        risk.SL = Math.max(entryPrice, trailingSL); // SL nunca se mueve por debajo del punto de entrada
-                        risk.message = `Posición LONG activa. Trailing SL en $${formatPrice(risk.SL)}.`;
-                    } else {
-                        risk.message = `Posición LONG activa. Ganancia < 1R.`;
+                        risk.SL = Math.max(entryPrice, trailingSL);
+                        risk.message = `Posición LONG activa. Trailing SL avanzado: $${formatPrice(risk.SL)}.`;
                     }
                 } else if (positions[timeframe].type === 'SHORT') {
-                    // SL y TP Inicial para SHORT
                     risk.SL = entryPrice + riskR;
                     risk.TP = entryPrice - riskR * PARAMS.ATR_TP_MULTIPLIER;
-                    
-                    // Lógica de Trailing SL para SHORT
                     const lossInR = (entryPrice - currentPrice) / riskR;
+                    
                     if (lossInR >= 1.0) {
-                        // Mover SL a Breakeven o Trailing Stop
                          const highHistory = history.slice(history.length - 1 - PARAMS.SIGNIFICANT_LOW_PERIOD, history.length - 1);
                         const lastSignificantHigh = highHistory.reduce((max, candle) => Math.max(max, candle.high), entryPrice);
                         const trailingSL = lastSignificantHigh + atr * PARAMS.TRAILING_STOP_ATR_MULTIPLIER;
                         
                         risk.SL = Math.min(entryPrice, trailingSL); 
-                        risk.message = `Posición SHORT activa. Trailing SL en $${formatPrice(risk.SL)}.`;
-                    } else {
-                        risk.message = `Posición SHORT activa. Ganancia < 1R.`;
+                        risk.message = `Posición SHORT activa. Trailing SL avanzado: $${formatPrice(risk.SL)}.`;
                     }
                 }
-                
                 risk.R = riskR;
-
             }
 
 
@@ -390,19 +322,127 @@ NOTA: La simulación de posición NO es persistente entre recargas del navegador
                     rsi: rsi || 0,
                     atr: atr || 0,
                 },
-                risk
+                risk,
+                currentPrice: currentPrice
             };
         }
 
-        // --- SECCIÓN 4: MANEJO DE LA API Y RENDERING ---
-        
+        // --- SECCIÓN 4: LÓGICA DE CONFLUENCIA Y ALERTA UNIFICADA ---
+
         /**
-         * Genera un sonido simple para alertas de trading.
-         * @param {number} frequency - Frecuencia del tono (Hz).
-         * @param {number} duration - Duración del tono (segundos).
-         * @param {number} volume - Volumen (0.0 a 1.0).
+         * Determina el mensaje final de alerta basado en las reglas de confluencia (Caso 1, 2, 3).
+         * @param {object} signals - Objeto con las señales de todos los timeframes (1d, 4h, 1h, 15m).
+         * @returns {{action: string, message: string, confidence: number}} Mensaje de acción final.
          */
+        function getFinalActionAndMessage(signals) {
+            const S1D = signals['1d'];
+            const S4H = signals['4h'];
+            const S1H = signals['1h'];
+            const S15M = signals['15m'];
+
+            if (!S1D || !S4H || !S1H || !S15M) {
+                 return { action: 'NEUTRO', message: 'Esperando todas las señales...', confidence: 0 };
+            }
+
+            let action = 'NEUTRO';
+            let message = 'El mercado está en pausa. Prioridad: Proteger capital.';
+            let confidence = 0; // 0 (Neutral), 1 (Bajo), 2 (Medio), 3 (Alto)
+            let alignment = 0; // Contador de timeframes LONG/SHORT
+
+            const isLong = (s) => s === 'LONG';
+            const isShort = (s) => s === 'SHORT';
+            const isNeutral = (s) => s === 'NEUTRO';
+
+            // Contar alineación (excluyendo 15m, que es la ejecución)
+            if (isLong(S1D)) alignment++;
+            if (isLong(S4H)) alignment++;
+            if (isLong(S1H)) alignment++;
+            if (isShort(S1D)) alignment--;
+            if (isShort(S4H)) alignment--;
+            if (isShort(S1H)) alignment--;
+            
+            const totalAligned = Math.abs(alignment);
+            
+            // CASO 1: 1D LONG (Sesgo Alcista)
+            if (isLong(S1D)) {
+                action = 'LONG';
+                if (isLong(S4H)) {
+                    // Alineación fuerte
+                    if (isLong(S1H) && isLong(S15M)) {
+                        message = '¡ALINEACIÓN TOTAL LONG! Tendencia fuerte. Ejecución inmediata LONG si no está en sobrecompra. Riesgo COMPLETO (1R).';
+                        confidence = 3;
+                    } else if (isNeutral(S1H) || isShort(S1H)) {
+                        message = 'Fuerte confluencia 1D/4H LONG. Buscar entrada LONG en 1H/15M al primer giro alcista (compra en el dip).';
+                        confidence = 2;
+                    } else {
+                        message = '1D/4H Long, pero 1H/15m están corrigiendo. Esperar con paciencia el giro 15m a LONG.';
+                        confidence = 2;
+                    }
+                } else if (isNeutral(S4H)) {
+                    message = '1D Long, 4H Neutral (consolidación). Operar LONG con menor exposición (0.5R). Esperar confirmación en 1H.';
+                    confidence = 1;
+                } else if (isShort(S4H)) {
+                    action = 'NEUTRO';
+                    message = 'Corrección profunda (4H Short) contra 1D Long. No vender, pero ESPERAR que 1H/15m giren a LONG antes de entrar.';
+                    confidence = 0;
+                }
+            }
+            
+            // CASO 3: 1D SHORT (Sesgo Bajista)
+            else if (isShort(S1D)) {
+                action = 'SHORT';
+                 if (isShort(S4H)) {
+                    // Alineación fuerte
+                    if (isShort(S1H) && isShort(S15M)) {
+                        message = '¡ALINEACIÓN TOTAL SHORT! Tendencia bajista fuerte. Ejecución inmediata SHORT si no está en sobreventa. Riesgo COMPLETO (1R).';
+                        confidence = 3;
+                    } else if (isNeutral(S1H) || isLong(S1H)) {
+                         message = 'Fuerte confluencia 1D/4H SHORT. Buscar entrada SHORT en 1H/15M al primer giro bajista (vender en el rebote).';
+                         confidence = 2;
+                    } else {
+                        message = '1D/4H Short, pero 1H/15m están rebotando. Esperar con paciencia el giro 15m a SHORT.';
+                        confidence = 2;
+                    }
+                } else if (isNeutral(S4H)) {
+                    message = '1D Short, 4H Neutral (consolidación). Operar SHORT con menor exposición (0.5R). Buscar agotamiento de rebotes en 1H.';
+                    confidence = 1;
+                } else if (isLong(S4H)) {
+                    action = 'NEUTRO';
+                    message = 'Corrección profunda (4H Long) contra 1D Short. No comprar, pero ESPERAR que 1H/15m giren a SHORT antes de entrar.';
+                    confidence = 0;
+                }
+            }
+
+            // CASO 2: 1D NEUTRAL (Consolidación / Rango)
+            else if (isNeutral(S1D)) {
+                confidence = 0; // Prioridad es no operar
+                if (isLong(S4H) && isLong(S1H)) {
+                    action = 'LONG';
+                    message = 'RANGO ALCISTA. Se puede operar LONG táctico (0.5R) en soportes del rango. Objetivos cortos y break-even rápido.';
+                } else if (isShort(S4H) && isShort(S1H)) {
+                    action = 'SHORT';
+                    message = 'RANGO BAJISTA. Se puede operar SHORT táctico (0.5R) en resistencias del rango. Objetivos cortos.';
+                } else {
+                    action = 'NEUTRO';
+                    message = '1D NEUTRAL. Señales mezcladas. Evitar operar, riesgo de ruptura falsa alto. Prioridad: Proteger capital.';
+                }
+            }
+
+            // Regla universal: Mínimo 2/3 alineados (1D, 4H, 1H)
+            if (action !== 'NEUTRO' && totalAligned < 2) {
+                action = 'NEUTRO';
+                message = 'ALINEACIÓN DÉBIL. Se requiere que al menos 2 de los marcos principales (1D, 4H, 1H) apunten en la misma dirección.';
+                confidence = 0;
+            }
+
+
+            return { action, message, confidence };
+        }
+        
+        // --- SECCIÓN 5: MANEJO DE API, RENDERING Y BUCLE PRINCIPAL ---
+        
         function playAlertSound(frequency = 600, duration = 0.2, volume = 0.5) {
+            // [CÓDIGO playAlertSound... Mantenido]
             try {
                 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
                 const oscillator = audioCtx.createOscillator();
@@ -425,13 +465,8 @@ NOTA: La simulación de posición NO es persistente entre recargas del navegador
             }
         }
         
-        /**
-         * Obtiene los datos históricos de velas (Klines) de Binance.
-         * @param {string} interval - Intervalo de tiempo (e.g., '1d', '4h').
-         * @param {number} limit - Número de velas a obtener (min 200 para EMA200).
-         * @returns {Promise<object[]>} Array de objetos de velas {open, high, low, close}.
-         */
         async function fetchPriceData(interval, limit = 500) {
+            // [CÓDIGO fetchPriceData... Mantenido]
             const url = `https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`;
             
             try {
@@ -458,25 +493,15 @@ NOTA: La simulación de posición NO es persistente entre recargas del navegador
             }
         }
 
-        /**
-         * Formatea un precio para mejor lectura.
-         * @param {number} price - El precio a formatear.
-         * @returns {string} Precio formateado.
-         */
         function formatPrice(price) {
+            // [CÓDIGO formatPrice... Mantenido]
             if (price === 0 || price === null || isNaN(price)) return '---';
-            
-            // Usar toFixed(0) para precios altos y toFixed(2) para precios pequeños (ATR)
             const decimals = price >= 1000 ? 0 : 2; 
             return price.toFixed(decimals).replace(/\B(?=(\d{3})+(?!\d))/g, ".");
         }
 
-        /**
-         * Genera el HTML para un módulo de timeframe.
-         * @param {string} timeframe - ID del marco temporal (e.g., '1d').
-         * @param {string} title - Título del marco temporal.
-         */
         function createModuleHTML(timeframe, title) {
+            // [CÓDIGO createModuleHTML... Mantenido]
             return `
                 <div id="module-${timeframe}" class="module-card rounded-xl p-5 md:p-6 shadow-2xl flex flex-col justify-between">
                     <h2 class="text-xl md:text-2xl font-bold mb-3 text-cyan-400">${title}</h2>
@@ -526,26 +551,13 @@ NOTA: La simulación de posición NO es persistente entre recargas del navegador
             `;
         }
 
-        /**
-         * Renderiza los resultados del análisis en el módulo de interfaz.
-         * @param {string} timeframe - ID del marco temporal.
-         * @param {object} result - Resultado del análisis de applyStrategy.
-         * @param {number} currentPrice - Precio actual de la vela.
-         */
         function renderAnalysis(timeframe, result, currentPrice) {
-            const module = document.getElementById(`module-${timeframe}`);
+            // [CÓDIGO renderAnalysis... Mantenido]
+             const module = document.getElementById(`module-${timeframe}`);
             if (!module) return;
 
-            // Alerta de nueva señal (solo si es LONG o SHORT y la señal ha cambiado)
-            if (result.signal !== 'NEUTRO' && previousSignals[timeframe] !== result.signal) {
-                const signalType = result.signal === 'LONG' ? 'COMPRA' : 'VENTA';
-                const frequency = result.signal === 'LONG' ? 880 : 440; // Tono más alto para LONG, más bajo para SHORT
-                playAlertSound(frequency);
-                console.log(`¡ALERTA! Nueva señal de ${signalType} en ${TIMEFRAMES[timeframe]}.`);
-                // Mostrar un mensaje temporal en la interfaz (además del sonido)
-                alert(`¡ALERTA! Nueva señal de ${signalType} en ${TIMEFRAMES[timeframe]}.`);
-            }
-            previousSignals[timeframe] = result.signal;
+            // Almacenar la señal actual para la lógica de confluencia
+            currentSignals[timeframe] = result.signal;
 
 
             // Actualizar precio global (solo para el último timeframe que se procesa)
@@ -557,7 +569,6 @@ NOTA: La simulación de posición NO es persistente entre recargas del navegador
             const reasonElement = document.getElementById(`reason-${timeframe}`);
             const btnTrade = document.getElementById(`btn-trade-${timeframe}`);
 
-            // Reducir la fuente de la señal a 2xl para que entre bien en el cuadro
             signalElement.className = `signal-${result.signal} text-2xl py-3 px-4 mb-4 rounded-lg text-center transition-colors duration-300`;
             signalElement.textContent = result.signal;
             reasonElement.textContent = result.reason;
@@ -594,23 +605,22 @@ NOTA: La simulación de posición NO es persistente entre recargas del navegador
             document.getElementById(`risk-message-${timeframe}`).textContent = result.risk.message;
         }
 
-        /**
-         * Ejecuta la secuencia completa de obtención de datos, cálculo y renderizado para un timeframe.
-         * @param {string} timeframe - ID del marco temporal.
-         */
         async function runAnalysis(timeframe) {
             const interval = timeframe;
             try {
-                // Necesitamos al menos 200 velas para el EMA 200 (limit=500 es seguro)
                 const history = await fetchPriceData(interval, 500); 
                 const currentPrice = history[history.length - 1].close;
 
                 const result = applyStrategy(history, timeframe);
                 renderAnalysis(timeframe, result, currentPrice);
 
+                // Si es el último timeframe (15m), consolida la alerta.
+                if (timeframe === '15m') {
+                    consolidateAlert();
+                }
+
             } catch (error) {
                 console.error(`Error al ejecutar el análisis para ${timeframe}:`, error);
-                // Asegurarse de que los elementos existen antes de interactuar
                 const reasonElement = document.getElementById(`reason-${timeframe}`);
                 const signalElement = document.getElementById(`signal-${timeframe}`);
                 if (reasonElement) reasonElement.textContent = `ERROR: ${error.message}`;
@@ -618,25 +628,58 @@ NOTA: La simulación de posición NO es persistente entre recargas del navegador
             }
         }
 
-        /**
-         * Ejecuta el análisis para todos los timeframes.
-         */
+        function consolidateAlert() {
+            const alertBox = document.getElementById('final-alert-box');
+            
+            // Asegurarse de que tenemos las 4 señales
+            if (Object.keys(currentSignals).length !== 4) return;
+
+            const { action, message, confidence } = getFinalActionAndMessage(currentSignals);
+            
+            let colorClass = 'bg-gray-700 text-gray-300';
+            let alertMessage = `**ACCIÓN FINAL: ${action}** (${confidence}/3 Confianza) \n\n${message}`;
+            let playSound = false;
+
+            // --- LÓGICA DE COLORACIÓN DE LA ALERTA UNIFICADA ---
+            if (action === 'LONG') {
+                colorClass = 'alert-bg-long text-white'; // Utiliza clase CSS personalizada
+                if (confidence >= 2 && previousSignals.finalAction !== action) {
+                    playSound = true;
+                }
+            } else if (action === 'SHORT') {
+                colorClass = 'alert-bg-short text-white'; // Utiliza clase CSS personalizada
+                 if (confidence >= 2 && previousSignals.finalAction !== action) {
+                    playSound = true;
+                }
+            } else {
+                colorClass = 'alert-bg-neutral text-gray-900'; // Utiliza clase CSS personalizada (Amarillo Oscuro)
+            }
+            // ---------------------------------------------------
+            
+            if (playSound) {
+                playAlertSound(action === 'LONG' ? 880 : 440);
+                alert(`*** ALERTA EBy 1.0 ***\nAcción: ${action} (${confidence}/3)\n\n${message}`);
+            }
+
+            // Almacenar el estado final
+            previousSignals.finalAction = action;
+
+            // Renderizar el mensaje final
+            alertBox.className = `p-4 rounded-lg text-sm transition-colors duration-300 whitespace-pre-line ${colorClass}`;
+            alertBox.innerHTML = alertMessage.replace(/\n/g, '<br>');
+        }
+        
         function runAllTimeframes() {
-            // Ejecutar el análisis técnico para todos los timeframes
             Object.keys(TIMEFRAMES).forEach(timeframe => {
                 runAnalysis(timeframe);
             });
         }
 
-        // --- SECCIÓN 5: LÓGICA DE INTERACCIÓN Y SIMULACIÓN ---
+        // --- SECCIÓN 6: LÓGICA DE INTERACCIÓN Y BUCLE ---
 
-        /**
-         * Maneja la simulación de apertura y cierre de posiciones.
-         * @param {string} timeframe - Marco temporal.
-         */
         function handleTradeAction(timeframe) {
+            // [CÓDIGO handleTradeAction... Mantenido]
             const result = document.getElementById(`signal-${timeframe}`).textContent;
-            // Quitamos el formato de miles (puntos) y el símbolo $
             const price = parseFloat(document.getElementById(`price-${timeframe}`).textContent.replace(/\$|\./g, '').replace(',', '.'));
             
             if (positions[timeframe] && positions[timeframe].isActive) {
@@ -657,13 +700,9 @@ NOTA: La simulación de posición NO es persistente entre recargas del navegador
                 alert('No se puede abrir. La señal no es LONG ni SHORT.');
             }
 
-            // Forzar una actualización de la interfaz después de la acción de trading
             runAnalysis(timeframe);
         }
 
-        /**
-         * Inicializa la interfaz y el bucle de actualización.
-         */
         function initApp() {
             const monitorGrid = document.getElementById('monitorGrid');
             if (monitorGrid) {
@@ -673,18 +712,15 @@ NOTA: La simulación de posición NO es persistente entre recargas del navegador
                 });
             }
 
-            // Ejecutar el primer análisis
             runAllTimeframes();
             
-            // Configurar la actualización cada 10 minutos (600,000 ms)
-            setInterval(runAllTimeframes, 600000); 
+            // Configurar la actualización cada 5 minutos (300,000 ms)
+            setInterval(runAllTimeframes, 300000); 
         }
 
         // --- INICIALIZACIÓN ---
-        // Asegurarse de que el DOM esté completamente cargado antes de inicializar la aplicación.
         document.addEventListener('DOMContentLoaded', initApp);
 
     </script>
 </body>
 </html>
-
